@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>貓咪監控台</title>
+<style>
+  :root { --bg: #f6f1ea; --card: #fffdf9; --ink: #2e2a26; --ink2: #6f675e; --line: #eadfce; --accent: #c78a3a; --ok: #4f8a5b; --warn: #c78a3a; --bad: #b5533c; --idle: #8d857b; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #1c1a18; --card: #272421; --ink: #efe9e1; --ink2: #aaa196; --line: #3a3530; --accent: #d9a05a; --ok: #7cba88; --warn: #d9a05a; --bad: #e08a72; --idle: #a39a8f; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 24px 16px 40px; background: var(--bg); color: var(--ink); font: 16px/1.5 system-ui, "Noto Sans TC", sans-serif; }
+  main { max-width: 480px; margin: 0 auto; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--ink2); font-size: 13px; margin: 0 0 20px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px; margin-bottom: 14px; }
+  .head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+  .name { font-size: 18px; font-weight: 700; }
+  .pill { font-size: 13px; font-weight: 600; white-space: nowrap; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); } .idle { color: var(--idle); }
+  .row { display: flex; justify-content: space-between; gap: 12px; padding: 7px 0; border-top: 1px solid var(--line); font-size: 14px; }
+  .row span:first-child { color: var(--ink2); flex: none; }
+  .row span:last-child { text-align: right; }
+  form { display: flex; gap: 8px; }
+  input { flex: 1; min-width: 0; height: 44px; padding: 0 12px; font-size: 16px; color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: 10px; }
+  button { height: 44px; padding: 0 18px; font-size: 15px; font-weight: 600; color: #fff; background: var(--accent); border: none; border-radius: 10px; }
+  .msg { color: var(--bad); font-size: 14px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>貓咪監控台</h1>
+  <p class="sub" id="sub">只看貓的健康狀態，不含日記和聊天內容。</p>
+  <div id="root"></div>
+</main>
+<script>
+const KEY = 'oc-monitor-pass'
+const root = document.getElementById('root')
+const sub = document.getElementById('sub')
+const store = {
+  get() { try { return localStorage.getItem(KEY) } catch { return null } },
+  set(v) { try { localStorage.setItem(KEY, v) } catch {} },
+  del() { try { localStorage.removeItem(KEY) } catch {} }
+}
+const b64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0))
+async function decrypt(box, pass) {
+  const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(pass), 'PBKDF2', false, ['deriveKey'])
+  const key = await crypto.subtle.deriveKey({ name: 'PBKDF2', hash: 'SHA-256', salt: b64(box.salt), iterations: box.iter }, base, { name: 'AES-GCM', length: 256 }, false, ['decrypt'])
+  const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64(box.iv) }, key, b64(box.data))
+  return JSON.parse(new TextDecoder().decode(plain))
+}
+const ago = (iso) => {
+  const m = Math.floor((Date.now() - Date.parse(iso)) / 60000)
+  if (!Number.isFinite(m)) return '不明'
+  if (m < 60) return `${Math.max(m, 0)} 分鐘前`
+  if (m < 1440) return `${Math.floor(m / 60)} 小時前`
+  return `${Math.floor(m / 1440)} 天前`
+}
+const AI = { ok: ['正常', 'ok'], credit: ['額度用完了，要儲值', 'bad'], rejected: ['key 不能用', 'bad'], 'no-key': ['沒有 key', 'bad'], off: ['被關掉了', 'warn'], unknown: ['暫時不確定', 'idle'] }
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
+function backupText(b) {
+  if (!b.enabled) return ['還沒設 PIN', 'warn']
+  if (b.failed) return ['最近一次失敗', 'warn']
+  return b.lastAt ? [ago(b.lastAt), 'ok'] : ['還沒備份', 'warn']
+}
+function card(c) {
+  const offline = Date.now() - Date.parse(c.at) > 2.5 * 3600000
+  const ai = AI[c.ai] || AI.unknown
+  const bk = backupText(c.backup)
+  const bad = ai[1] === 'bad' || c.errors24h > 0
+  const warn = ai[1] === 'warn' || bk[1] === 'warn'
+  const pill = bad ? ['要處理', 'bad'] : warn ? ['要注意', 'warn'] : offline ? ['沒開著', 'idle'] : ['正常', 'ok']
+  return `<section class="card"><div class="head"><span class="name">${esc(c.name || '（沒有名字）')}</span><span class="pill ${pill[1]}">${pill[0]}</span></div>
+    <div class="row"><span>最後回報</span><span>${ago(c.at)}</span></div>
+    <div class="row"><span>AI</span><span class="${ai[1]}">${ai[0]}</span></div>
+    <div class="row"><span>雲端備份</span><span class="${bk[1]}">${bk[0]}</span></div>
+    <div class="row"><span>程式錯誤（24 小時）</span><span class="${c.errors24h > 0 ? 'bad' : 'ok'}">${c.errors24h > 0 ? esc(c.errors24h) + ' 筆' : '沒有'}</span></div>
+    <div class="row"><span>版本</span><span>${esc(c.version)}</span></div></section>`
+}
+function askPass(msg) {
+  root.innerHTML = `${msg ? `<p class="msg">${msg}</p>` : ''}<form id="f"><input id="p" type="password" placeholder="密碼" autocomplete="current-password"><button>進入</button></form>`
+  document.getElementById('f').onsubmit = (e) => { e.preventDefault(); load(document.getElementById('p').value.trim()) }
+}
+async function load(pass) {
+  let box
+  try {
+    const r = await fetch(`health.enc.json?t=${Date.now()}`, { cache: 'no-store' })
+    if (!r.ok) throw new Error(String(r.status))
+    box = await r.json()
+  } catch {
+    root.innerHTML = '<p class="msg">讀不到資料，等一下再重新整理。</p>'
+    return
+  }
+  let data
+  try {
+    data = await decrypt(box, pass)
+  } catch {
+    store.del()
+    askPass('密碼不對。')
+    return
+  }
+  store.set(pass)
+  sub.textContent = `資料更新於 ${ago(data.at)}。只有健康狀態，不含日記和聊天內容。`
+  root.innerHTML = data.cats.length ? data.cats.map(card).join('') : '<p>還沒有貓回報。</p>'
+}
+const saved = store.get()
+if (saved) load(saved)
+else askPass('')
+</script>
+</body>
+</html>
